@@ -88,6 +88,50 @@ def test_flag_equals_value_form_is_recognized():
     assert [o.value for o in application.outputs] == ["result.csv"]
 
 
+def test_flag_aliases_joined_by_pipe_are_all_recognized():
+    # a tool that accepts both spellings for the same flag
+    recipe = Recipe(
+        target="tool",
+        flag_roles={"-o|--output": FlagRole(role="output", key_template="{name}")},
+    )
+    via_short = apply_recipe(recipe, ["-o", "a.txt"])
+    via_long = apply_recipe(recipe, ["--output", "a.txt"])
+    assert [o.value for o in via_short.outputs] == ["a.txt"]
+    assert [o.value for o in via_long.outputs] == ["a.txt"]
+    # the canonical (joined) key is reported as the source either way
+    assert via_short.outputs[0].source == "-o|--output"
+    assert via_long.outputs[0].source == "-o|--output"
+
+
+def test_delimiter_splits_a_single_value_into_multiple():
+    recipe = Recipe(
+        target="tool",
+        flag_roles={"--in": FlagRole(role="input", delimiter=",")},
+    )
+    application = apply_recipe(recipe, ["--in", "a.txt,b.txt,c.txt"])
+    assert application.inputs == ["a.txt", "b.txt", "c.txt"]
+
+
+def test_delimiter_and_repeatable_can_combine():
+    # "--in a.txt,x.txt b.txt" -> both a repeated flag AND a delimited value
+    recipe = Recipe(
+        target="tool",
+        flag_roles={"--in": FlagRole(role="input", repeatable=True, delimiter=",")},
+    )
+    application = apply_recipe(recipe, ["--in", "a.txt,x.txt", "b.txt"])
+    assert application.inputs == ["a.txt", "x.txt", "b.txt"]
+
+
+def test_an_undeclared_flag_spelling_is_simply_untracked_not_an_error():
+    # using "-out" when only "--output" is declared: no crash, just unlinked
+    recipe = Recipe(
+        target="tool",
+        flag_roles={"--output": FlagRole(role="output")},
+    )
+    application = apply_recipe(recipe, ["-out", "a.txt"])
+    assert application.outputs == []
+
+
 def test_entrypoint_flag_overrides_transform_identity():
     recipe = Recipe(
         target="uv",

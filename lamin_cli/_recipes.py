@@ -30,6 +30,10 @@ class FlagRole:
 
     role: Literal["input", "output"]
     repeatable: bool = False
+    # a single value is itself a delimited list, e.g. "--in a.txt,b.txt" ->
+    # ["a.txt", "b.txt"]. Independent of `repeatable` (that's for repeated
+    # occurrences/trailing values; this is for one value packed together).
+    delimiter: str | None = None
     # for outputs: a key template, e.g. "outputs/{name}"; {name} is the
     # basename of the value this flag pointed to
     key_template: str | None = None
@@ -167,19 +171,38 @@ def _bare_tokens(args: list[str]) -> list[str]:
     return [token for token in args if not _is_flag(token)]
 
 
+def _expand_flag_roles(
+    flag_roles: dict[str, FlagRole],
+) -> dict[str, tuple[str, FlagRole]]:
+    """Map every individual flag spelling to its role and canonical key.
+
+    A `flag_roles` key can list aliases joined by "|" (e.g. "-o|--output")
+    for a tool that accepts more than one spelling of the same flag; this
+    expands that into a lookup by each individual spelling, keeping the
+    original joined key as the canonical identifier (e.g. for
+    `--output-key` to target).
+    """
+    expanded: dict[str, tuple[str, FlagRole]] = {}
+    for key, role in flag_roles.items():
+        for alias in key.split("|"):
+            expanded[alias] = (key, role)
+    return expanded
+
+
 def _bare_tokens_for_recipe(args: list[str], recipe: Recipe) -> list[str]:
     """Non-flag, non-flag-value tokens, using this recipe's own flags.
 
     Needed for `entrypoint_positional`, which -- unlike matching -- needs the
     *exact* count of positional tokens, not just their presence.
     """
+    by_flag = _expand_flag_roles(recipe.flag_roles)
     bare = []
     i = 0
     while i < len(args):
         token = args[i]
-        if token in recipe.flag_roles:
+        if token in by_flag:
             i += 1
-            if recipe.flag_roles[token].repeatable:
+            if by_flag[token][1].repeatable:
                 while i < len(args) and not _is_flag(args[i]):
                     i += 1
             elif i < len(args):
@@ -257,13 +280,16 @@ class RecipeApplication:
     extra_outputs: list[str]
 
 
-def _flag_values(flag: str, args: list[str], *, repeatable: bool) -> list[str]:
-    """All values passed to `flag`, wherever it appears, in any order."""
+def _flag_values(flags: list[str], args: list[str], *, repeatable: bool) -> list[str]:
+    """All values passed to any of `flags` (aliases of the same flag).
+
+    Wherever they appear, in any order.
+    """
     values: list[str] = []
     i = 0
     while i < len(args):
         token = args[i]
-        if token == flag:
+        if token in flags:
             i += 1
             if repeatable:
                 while i < len(args) and not _is_flag(args[i]):
@@ -274,7 +300,7 @@ def _flag_values(flag: str, args: list[str], *, repeatable: bool) -> list[str]:
                 values.append(args[i])
                 i += 1
             continue
-        if token.startswith(f"{flag}="):
+        if any(token.startswith(f"{flag}=") for flag in flags):
             values.append(token.split("=", 1)[1])
         i += 1
     return values
@@ -284,7 +310,7 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
     """Resolve a matched recipe's roles against a concrete invocation's argv."""
     entrypoint = None
     if recipe.entrypoint_flag is not None:
-        found = _flag_values(recipe.entrypoint_flag, args, repeatable=False)
+        found = _flag_values(recipe.entrypoint_flag.split("|"), args, repeatable=False)
         entrypoint = found[0] if found else None
     elif recipe.entrypoint_positional is not None:
         remaining = _remaining_after_required(
@@ -295,13 +321,15 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
 
     inputs: list[str] = []
     outputs: list[ResolvedOutput] = []
-    for flag, role in recipe.flag_roles.items():
-        values = _flag_values(flag, args, repeatable=role.repeatable)
+    for key, role in recipe.flag_roles.items():
+        values = _flag_values(key.split("|"), args, repeatable=role.repeatable)
+        if role.delimiter:
+            values = [item for value in values for item in value.split(role.delimiter)]
         if role.role == "input":
             inputs.extend(values)
         else:
             outputs.extend(
-                ResolvedOutput(value=value, key_template=role.key_template, source=flag)
+                ResolvedOutput(value=value, key_template=role.key_template, source=key)
                 for value in values
             )
 
