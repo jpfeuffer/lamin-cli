@@ -1,0 +1,249 @@
+"""Recipes: how to interpret an ambiguous `lamin run` target's argv.
+
+A recipe is personal, cross-project tool knowledge ("--in means input for this
+tool"), not project data, so it lives in a local, per-machine JSON file by
+default rather than a repo file or a lamindb record. See the design notes for
+why (session-local, not part of this repo).
+
+Matching deliberately doesn't parse CLI grammar (subcommand vs. flag vs.
+positional): a recipe's `required_tokens` must appear, in order, among the
+bare (non-flag) tokens of an invocation; flag roles are assigned by flag name
+regardless of position. This tolerates reordering and new unrelated flags
+without needing to understand the tool's grammar at all.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Literal
+
+RECIPES_ENV = "LAMIN_RUN_RECIPES"
+
+
+@dataclass
+class FlagRole:
+    """What a flag's value(s) mean."""
+
+    role: Literal["input", "output"]
+    repeatable: bool = False
+    # for outputs: a key template, e.g. "outputs/{name}"; {name} is the
+    # basename of the value this flag pointed to
+    key_template: str | None = None
+
+
+@dataclass
+class Recipe:
+    """How to interpret one shape of invocation of `target`."""
+
+    target: str
+    required_tokens: list[str] = field(default_factory=list)
+    # a flag name (e.g. "--script") whose value is the entrypoint/identity,
+    # overriding the target's own name as the transform's key; None means the
+    # target itself is the identity
+    entrypoint_flag: str | None = None
+    version_command: list[str] | None = None
+    environment_command: list[str] | None = None
+    flag_roles: dict[str, FlagRole] = field(default_factory=dict)
+    # fixed paths or glob patterns the tool reads/writes without a
+    # corresponding flag at all (stdin/stdout, a fixed filename, a derived
+    # filename convention)
+    extra_inputs: list[str] = field(default_factory=list)
+    extra_outputs: list[str] = field(default_factory=list)
+    last_verified_version: str | None = None
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["flag_roles"] = {
+            flag: asdict(role) for flag, role in self.flag_roles.items()
+        }
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Recipe:
+        data = dict(data)
+        flag_roles = {
+            flag: FlagRole(**role) for flag, role in data.get("flag_roles", {}).items()
+        }
+        data["flag_roles"] = flag_roles
+        return cls(**data)
+
+
+def default_recipes_path() -> Path:
+    from lamindb_setup.core._settings_store import settings_dir
+
+    return Path(settings_dir) / "run-recipes.json"
+
+
+def recipes_path(explicit: str | None = None) -> Path:
+    """Resolve the recipes file.
+
+    Precedence: explicit path, then $LAMIN_RUN_RECIPES, then the local
+    per-machine default.
+    """
+    if explicit is not None:
+        return Path(explicit)
+    env_value = os.environ.get(RECIPES_ENV)
+    if env_value:
+        return Path(env_value)
+    return default_recipes_path()
+
+
+def load_recipes(path: Path) -> list[Recipe]:
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text())
+    return [Recipe.from_dict(entry) for entry in data.get("recipes", [])]
+
+
+def save_recipes(path: Path, recipes: list[Recipe]) -> None:
+    """Write atomically (temp file + rename).
+
+    A crash mid-write never corrupts the file, and concurrent readers never
+    see a partial write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"recipes": [recipe.to_dict() for recipe in recipes]}
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=".run-recipes-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        Path(tmp_path).replace(path)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
+def add_recipe(path: Path, new_recipe: Recipe) -> Recipe:
+    """Save `new_recipe`, reusing an identical one that appeared concurrently.
+
+    Mirrors how lamindb itself reuses an existing Transform by hash rather
+    than creating a duplicate: two `lamin run` invocations racing to define a
+    recipe for the same shape should converge on one, not fork into two.
+    """
+    recipes = load_recipes(path)
+    for existing in recipes:
+        if (
+            existing.target == new_recipe.target
+            and existing.required_tokens == new_recipe.required_tokens
+        ):
+            return existing
+    recipes.append(new_recipe)
+    save_recipes(path, recipes)
+    return new_recipe
+
+
+def _is_flag(token: str) -> bool:
+    return token.startswith("-") and token != "-"
+
+
+def _bare_tokens(args: list[str]) -> list[str]:
+    """Non-flag, non-flag-value tokens: crude but sufficient for matching."""
+    bare = []
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if _is_flag(token):
+            continue
+        bare.append(token)
+    return bare
+
+
+def _is_subsequence(needle: list[str], haystack: list[str]) -> bool:
+    it = iter(haystack)
+    return all(token in it for token in needle)
+
+
+def find_matching_recipe(
+    target: str, args: list[str], recipes: list[Recipe]
+) -> Recipe | None:
+    """The matching recipe, if any.
+
+    A recipe matches when its target matches and its `required_tokens` appear,
+    in order, among the bare tokens of `args`. Flags are irrelevant to
+    matching entirely (order-independent, and unrecognized ones don't break a
+    match) -- only the bare/subcommand-like token sequence is checked.
+    """
+    bare = _bare_tokens(args)
+    candidates = [recipe for recipe in recipes if recipe.target == target]
+    # prefer the most specific match (longest required_tokens) first
+    for recipe in sorted(candidates, key=lambda r: -len(r.required_tokens)):
+        if _is_subsequence(recipe.required_tokens, bare):
+            return recipe
+    return None
+
+
+@dataclass
+class ResolvedOutput:
+    value: str
+    key_template: str | None = None
+
+
+@dataclass
+class RecipeApplication:
+    """What a recipe means for one concrete invocation."""
+
+    entrypoint: str | None
+    inputs: list[str]
+    outputs: list[ResolvedOutput]
+    extra_inputs: list[str]
+    extra_outputs: list[str]
+
+
+def _flag_values(flag: str, args: list[str], *, repeatable: bool) -> list[str]:
+    """All values passed to `flag`, wherever it appears, in any order."""
+    values: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == flag:
+            i += 1
+            if repeatable:
+                while i < len(args) and not _is_flag(args[i]):
+                    values.append(args[i])
+                    i += 1
+                continue
+            if i < len(args):
+                values.append(args[i])
+                i += 1
+            continue
+        if token.startswith(f"{flag}="):
+            values.append(token.split("=", 1)[1])
+        i += 1
+    return values
+
+
+def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
+    """Resolve a matched recipe's roles against a concrete invocation's argv."""
+    entrypoint = None
+    if recipe.entrypoint_flag is not None:
+        found = _flag_values(recipe.entrypoint_flag, args, repeatable=False)
+        entrypoint = found[0] if found else None
+
+    inputs: list[str] = []
+    outputs: list[ResolvedOutput] = []
+    for flag, role in recipe.flag_roles.items():
+        values = _flag_values(flag, args, repeatable=role.repeatable)
+        if role.role == "input":
+            inputs.extend(values)
+        else:
+            outputs.extend(
+                ResolvedOutput(value=value, key_template=role.key_template)
+                for value in values
+            )
+
+    return RecipeApplication(
+        entrypoint=entrypoint,
+        inputs=inputs,
+        outputs=outputs,
+        extra_inputs=list(recipe.extra_inputs),
+        extra_outputs=list(recipe.extra_outputs),
+    )
