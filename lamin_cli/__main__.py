@@ -1512,6 +1512,7 @@ _MODAL_ONLY = ("image_url", "packages", "cpu", "gpu")
 @click.option("--upload-outputs", is_flag=True, default=False, help="Force outputs to upload even if the instance keeps artifacts local by default.")
 @click.option("--dry-run", is_flag=True, default=False, help="Report what would be linked as inputs and registered as outputs, without executing the target or saving anything. Local only.")
 @click.option("--recipe-file", type=str, default=None, help="Where to look up/store recipes for ambiguous targets. Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.")
+@click.option("--output-key", "output_keys", multiple=True, type=str, help="Override a recipe output's key for this run only: a bare TEMPLATE if there's exactly one output, or FLAG=TEMPLATE to target a specific one. Repeatable.")
 @click.pass_context
 # fmt: on
 def run(
@@ -1530,6 +1531,7 @@ def run(
     upload_outputs: bool,
     dry_run: bool,
     recipe_file: str | None,
+    output_keys: tuple[str, ...],
 ):
     """Run a script or executable, tracked as a run.
 
@@ -1612,6 +1614,7 @@ def run(
         upload_outputs=upload_outputs,
         dry_run=dry_run,
         recipe_file=recipe_file,
+        output_keys=output_keys,
     )
     try:
         if dry_run:

@@ -216,6 +216,43 @@ def test_outputs_are_collected_from_flags_and_explicit_registration():
     ]
 
 
+# -- overriding a recipe's output key for one run ----------------------------
+
+
+def test_output_key_override_has_an_easy_fallback_for_a_single_output():
+    outputs = [(Path("result.csv"), "outputs/{name}", "-out")]
+    overridden = _run._apply_output_key_overrides(outputs, ("custom/path.csv",))
+    assert overridden == [(Path("result.csv"), "custom/path.csv")]
+
+
+def test_bare_output_key_override_is_ambiguous_with_multiple_outputs():
+    outputs = [
+        (Path("a.csv"), None, "-out1"),
+        (Path("b.csv"), None, "-out2"),
+    ]
+    with pytest.raises(_run.RunError, match="ambiguous"):
+        _run._apply_output_key_overrides(outputs, ("custom.csv",))
+
+
+def test_keyed_output_key_override_targets_a_specific_output():
+    outputs = [
+        (Path("a.csv"), None, "-out1"),
+        (Path("b.csv"), None, "-out2"),
+    ]
+    overridden = _run._apply_output_key_overrides(outputs, ("-out2=renamed/{name}",))
+    assert overridden == [
+        (Path("a.csv"), None),
+        (Path("b.csv"), "renamed/{name}"),
+    ]
+
+
+def test_no_override_leaves_the_recipes_template_untouched():
+    outputs = [(Path("result.csv"), "outputs/{name}", "-out")]
+    assert _run._apply_output_key_overrides(outputs, ()) == [
+        (Path("result.csv"), "outputs/{name}")
+    ]
+
+
 # -- how a target is started -------------------------------------------------
 
 

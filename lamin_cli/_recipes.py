@@ -42,12 +42,24 @@ class Recipe:
     target: str
     required_tokens: list[str] = field(default_factory=list)
     # a flag name (e.g. "--script") whose value is the entrypoint/identity,
-    # overriding the target's own name as the transform's key; None means the
-    # target itself is the identity
+    # overriding the target's own name as the transform's key; None means no
+    # flag-based entrypoint (see entrypoint_positional below)
     entrypoint_flag: str | None = None
+    # the more common case for launchers: a bare positional with no flag at
+    # all (`uv run script.py`, `python foo.py`). 0-based index among the bare
+    # tokens that come *after* required_tokens. entrypoint_flag takes
+    # precedence if both are set; neither set means the target itself is the
+    # identity.
+    entrypoint_positional: int | None = None
     version_command: list[str] | None = None
     environment_command: list[str] | None = None
     flag_roles: dict[str, FlagRole] = field(default_factory=dict)
+    # other flags that take a value but aren't an input/output -- not tracked
+    # otherwise, but needed so a positional entrypoint (see above) isn't
+    # thrown off by mistaking that value for a bare/positional token. There's
+    # no way to infer this without knowing the tool's grammar, so it must be
+    # declared explicitly.
+    value_flags: list[str] = field(default_factory=list)
     # fixed paths or glob patterns the tool reads/writes without a
     # corresponding flag at all (stdin/stdout, a fixed filename, a derived
     # filename convention)
@@ -144,22 +156,66 @@ def _is_flag(token: str) -> bool:
 
 
 def _bare_tokens(args: list[str]) -> list[str]:
-    """Non-flag, non-flag-value tokens: crude but sufficient for matching."""
+    """Non-flag tokens, for matching a recipe's `required_tokens`.
+
+    Doesn't attempt to skip an unrelated flag's *value* (we don't know which
+    unknown flags take one) -- but that's fine here: matching only checks
+    that `required_tokens` appear as a subsequence, and tolerates extra noise
+    in between. `_bare_tokens_for_recipe` below is the precise version, used
+    once a specific recipe is known.
+    """
+    return [token for token in args if not _is_flag(token)]
+
+
+def _bare_tokens_for_recipe(args: list[str], recipe: Recipe) -> list[str]:
+    """Non-flag, non-flag-value tokens, using this recipe's own flags.
+
+    Needed for `entrypoint_positional`, which -- unlike matching -- needs the
+    *exact* count of positional tokens, not just their presence.
+    """
     bare = []
-    skip_next = False
-    for token in args:
-        if skip_next:
-            skip_next = False
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in recipe.flag_roles:
+            i += 1
+            if recipe.flag_roles[token].repeatable:
+                while i < len(args) and not _is_flag(args[i]):
+                    i += 1
+            elif i < len(args):
+                i += 1
+            continue
+        if token in recipe.value_flags:
+            i += 2
             continue
         if _is_flag(token):
+            i += 1
             continue
         bare.append(token)
+        i += 1
     return bare
 
 
 def _is_subsequence(needle: list[str], haystack: list[str]) -> bool:
     it = iter(haystack)
     return all(token in it for token in needle)
+
+
+def _remaining_after_required(required_tokens: list[str], bare: list[str]) -> list[str]:
+    """Bare tokens still left after greedily consuming `required_tokens`.
+
+    Used to find a positional entrypoint like the script in `uv run
+    script.py`: nothing named it, it's just whatever bare token comes after
+    the subcommand chain.
+    """
+    idx = 0
+    for token in required_tokens:
+        while idx < len(bare) and bare[idx] != token:
+            idx += 1
+        if idx == len(bare):
+            return []
+        idx += 1
+    return bare[idx:]
 
 
 def find_matching_recipe(
@@ -185,6 +241,9 @@ def find_matching_recipe(
 class ResolvedOutput:
     value: str
     key_template: str | None = None
+    # the flag that produced this output, or the glob pattern for an
+    # extra_output -- an identifier `--output-key` can target for an override
+    source: str | None = None
 
 
 @dataclass
@@ -227,6 +286,12 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
     if recipe.entrypoint_flag is not None:
         found = _flag_values(recipe.entrypoint_flag, args, repeatable=False)
         entrypoint = found[0] if found else None
+    elif recipe.entrypoint_positional is not None:
+        remaining = _remaining_after_required(
+            recipe.required_tokens, _bare_tokens_for_recipe(args, recipe)
+        )
+        if recipe.entrypoint_positional < len(remaining):
+            entrypoint = remaining[recipe.entrypoint_positional]
 
     inputs: list[str] = []
     outputs: list[ResolvedOutput] = []
@@ -236,7 +301,7 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
             inputs.extend(values)
         else:
             outputs.extend(
-                ResolvedOutput(value=value, key_template=role.key_template)
+                ResolvedOutput(value=value, key_template=role.key_template, source=flag)
                 for value in values
             )
 

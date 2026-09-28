@@ -113,6 +113,56 @@ def test_no_entrypoint_flag_means_no_override():
     assert application.entrypoint is None
 
 
+def test_entrypoint_positional_finds_the_bare_token_after_required_tokens():
+    # the common launcher case: no flag at all, e.g. `uv run script.py`
+    recipe = Recipe(target="uv", required_tokens=["run"], entrypoint_positional=0)
+    application = apply_recipe(recipe, ["run", "script.py"])
+    assert application.entrypoint == "script.py"
+
+
+def test_entrypoint_positional_skips_flags_and_their_values():
+    # --project takes a value we don't care about; without knowing that, its
+    # value "x" would be mistaken for a bare/positional token
+    recipe = Recipe(
+        target="uv",
+        required_tokens=["run"],
+        entrypoint_positional=0,
+        value_flags=["--project"],
+    )
+    application = apply_recipe(recipe, ["-v", "run", "--project", "x", "script.py"])
+    assert application.entrypoint == "script.py"
+
+
+def test_entrypoint_positional_also_skips_flag_roles_values():
+    # a flag already tracked via flag_roles must be skipped too, not just
+    # value_flags -- both mechanisms need to cooperate
+    recipe = Recipe(
+        target="uv",
+        required_tokens=["run"],
+        entrypoint_positional=0,
+        flag_roles={"--data": FlagRole(role="input")},
+    )
+    application = apply_recipe(recipe, ["run", "--data", "d.csv", "script.py"])
+    assert application.entrypoint == "script.py"
+
+
+def test_entrypoint_flag_takes_precedence_over_entrypoint_positional():
+    recipe = Recipe(
+        target="uv",
+        required_tokens=["run"],
+        entrypoint_flag="--script",
+        entrypoint_positional=0,
+    )
+    application = apply_recipe(recipe, ["run", "--script", "real.py", "decoy.py"])
+    assert application.entrypoint == "real.py"
+
+
+def test_resolved_output_carries_its_source_flag():
+    recipe = _footool_recipe()
+    application = apply_recipe(recipe, ["info", "runs", "-out", "result.csv"])
+    assert application.outputs[0].source == "-out"
+
+
 def test_extra_inputs_and_outputs_are_independent_of_argv():
     recipe = Recipe(
         target="aligner",

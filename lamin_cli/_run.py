@@ -52,6 +52,7 @@ class RunRequest:
     upload_outputs: bool = False
     dry_run: bool = False
     recipe_file: str | None = None
+    output_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -433,6 +434,38 @@ def collect_output_paths(
     return paths
 
 
+def _apply_output_key_overrides(
+    outputs: list[tuple[Path, str | None, str | None]], overrides: tuple[str, ...]
+) -> list[tuple[Path, str | None]]:
+    """Apply `--output-key` for one run, without touching the recipe itself.
+
+    A bare `TEMPLATE` (no "=") only works when there's exactly one recipe
+    output to begin with -- unambiguous, no need to name it. Multiple outputs
+    need `FLAG=TEMPLATE` (FLAG is the recipe's flag name, or the glob pattern
+    for an extra_output) to say which one it targets.
+    """
+    bare = [o for o in overrides if "=" not in o]
+    keyed = dict(o.split("=", 1) for o in overrides if "=" in o)
+    if bare:
+        if len(bare) > 1:
+            raise RunError(
+                "Multiple --output-key values without '=' given; use"
+                " --output-key FLAG=template to target each one."
+            )
+        if len(outputs) != 1:
+            raise RunError(
+                f"--output-key {bare[0]!r} is ambiguous: {len(outputs)} outputs"
+                " matched. Use --output-key FLAG=template to target a specific"
+                " one (FLAG is the recipe's flag name or extra_output pattern)."
+            )
+        path, _, source = outputs[0]
+        return [(path, bare[0])]
+    return [
+        (path, keyed.get(source, template) if source is not None else template)
+        for path, template, source in outputs
+    ]
+
+
 def _register_outputs(
     run, paths: list[tuple[Path, str | None]], branch, space, *, upload_outputs: bool
 ) -> None:
@@ -680,13 +713,19 @@ def _prepare_run(request: RunRequest) -> PreparedRun:
         run.projects.add(project_record)
     _link_inputs(run, translations)
 
-    recipe_outputs: list[tuple[Path, str | None]] = []
+    recipe_outputs_raw: list[tuple[Path, str | None, str | None]] = []
     if application is not None:
-        recipe_outputs.extend(
-            (Path(output.value), output.key_template) for output in application.outputs
+        recipe_outputs_raw.extend(
+            (Path(output.value), output.key_template, output.source)
+            for output in application.outputs
         )
         for pattern in application.extra_outputs:
-            recipe_outputs.extend((path, None) for path in Path.cwd().glob(pattern))
+            recipe_outputs_raw.extend(
+                (path, None, pattern) for path in Path.cwd().glob(pattern)
+            )
+    recipe_outputs = _apply_output_key_overrides(
+        recipe_outputs_raw, request.output_keys
+    )
 
     return PreparedRun(
         run=run,
@@ -862,13 +901,17 @@ def run_dry(request: RunRequest) -> int:
 
     # recipe-templated entries first, so they win the dedup below over the
     # generic --out/--output heuristic matching the same path
-    output_paths: list[tuple[Path, str | None]] = []
+    recipe_outputs_raw: list[tuple[Path, str | None, str | None]] = []
     if application is not None:
-        output_paths.extend(
-            (Path(output.value), output.key_template) for output in application.outputs
+        recipe_outputs_raw.extend(
+            (Path(output.value), output.key_template, output.source)
+            for output in application.outputs
         )
         for pattern in application.extra_outputs:
-            output_paths.extend((p, None) for p in Path.cwd().glob(pattern))
+            recipe_outputs_raw.extend(
+                (p, None, pattern) for p in Path.cwd().glob(pattern)
+            )
+    output_paths = _apply_output_key_overrides(recipe_outputs_raw, request.output_keys)
     output_paths.extend(
         collect_output_paths([target, *target_args], request.register_outputs)
     )
