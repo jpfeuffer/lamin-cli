@@ -9,6 +9,8 @@ from lamin_cli._recipe_wizard import (
     _flag_always_lacks_a_value,
     _flag_example_value,
     _flag_has_lamin_uri_value,
+    _looks_like_key_value,
+    _unique_flags,
     run_wizard,
 )
 
@@ -191,4 +193,49 @@ def test_a_skipped_but_value_bearing_flag_does_not_corrupt_positional_counting(
     recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
     assert recipe is not None
     assert "--out" in recipe.value_flags
+    assert recipe.entrypoint_positional == 0
+
+
+# -- GATK/Picard-style "KEY=VALUE" options, no dash at all -------------------
+
+
+def test_key_value_style_tokens_are_recognized_as_flags():
+    assert _looks_like_key_value("INPUT=in.bam") is True
+    assert _looks_like_key_value("--flag") is False  # dashed, handled already
+    assert _looks_like_key_value("--flag=value") is False  # already a flag
+    assert _looks_like_key_value("plain_value") is False  # no "="
+
+
+def test_unique_flags_discovers_key_value_tokens_too():
+    args = ["SomeTool", "INPUT=in.bam", "OUTPUT=out.bam"]
+    assert _unique_flags(args) == ["INPUT", "OUTPUT"]
+
+
+def test_wizard_asks_about_key_value_flags_and_defaults_correctly(tmp_path):
+    args = [
+        "SomeTool",
+        "INPUT=lamin://acme/x/artifact/key/d.csv",
+        "OUTPUT=r.csv",
+        "train.py",
+    ]
+    answers = (
+        "\n"  # INPUT role: accept default ("input", it's a lamin:// URI)
+        "\n"  # INPUT repeatable?
+        "\n"  # INPUT delimiter?
+        "\n"  # INPUT aliases?
+        "skip\n"  # OUTPUT role: not exercising output here
+        "fixed\n"  # token "SomeTool"
+        "entrypoint\n"  # token "train.py" -- OUTPUT=r.csv's value must not
+        # show up as a separate third bare token here
+        "\n"  # extra_inputs?
+        "\n"  # extra_outputs?
+        "\n"  # version_command
+        "\n"  # environment_command
+        "y\n"  # save?
+    )
+    recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
+    assert recipe is not None
+    assert recipe.flag_roles["INPUT"].role == "input"
+    assert "OUTPUT" in recipe.value_flags
+    assert recipe.required_tokens == ["SomeTool"]
     assert recipe.entrypoint_positional == 0

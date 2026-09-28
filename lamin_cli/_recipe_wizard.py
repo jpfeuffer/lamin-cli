@@ -33,13 +33,25 @@ def _is_flag(token: str) -> bool:
     return token.startswith("-") and token != "-"
 
 
+def _looks_like_key_value(token: str) -> bool:
+    """A bare "KEY=VALUE" token with no dash.
+
+    As GATK/Picard-style tools use (`INPUT=file.bam`) instead of
+    `--input file.bam`.
+    """
+    return not _is_flag(token) and "=" in token and not token.startswith("=")
+
+
 def _unique_flags(args: list[str]) -> list[str]:
-    """Every distinct flag spelling in `args`, in first-seen order."""
+    """Every distinct flag/KEY=VALUE spelling in `args`, in first-seen order."""
     seen: list[str] = []
     for token in args:
-        if not _is_flag(token):
+        if _is_flag(token):
+            name = token.split("=", 1)[0]
+        elif _looks_like_key_value(token):
+            name = token.split("=", 1)[0]
+        else:
             continue
-        name = token.split("=", 1)[0]
         if name not in seen:
             seen.append(name)
     return seen
@@ -102,7 +114,12 @@ def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
             default = "boolean"
         else:
             example = _flag_example_value(flag, args)
-            context = f" (e.g. {flag} {example!r})" if example is not None else ""
+            if example is None:
+                context = ""
+            elif f"{flag}={example}" in args:
+                context = f" (e.g. {flag}={example!r})"
+            else:
+                context = f" (e.g. {flag} {example!r})"
             default = "input" if _flag_has_lamin_uri_value(flag, args) else "skip"
         choice = click.prompt(
             f"what does {flag!r}{context} mean?",
@@ -159,10 +176,16 @@ def _bare_tokens_excluding(
     for key, role in flag_roles.items():
         for alias in key.split("|"):
             by_flag[alias] = role
+    known_flags = [*by_flag, *value_flags]
     positions = []
     i = 0
     while i < len(args):
         token = args[i]
+        # a fused "KEY=VALUE" token for a known flag (with or without a dash)
+        # -- the value is already inside this one token, nothing more to skip
+        if any(token.startswith(f"{flag}=") for flag in known_flags):
+            i += 1
+            continue
         if token in by_flag:
             i += 1
             if by_flag[token].repeatable:

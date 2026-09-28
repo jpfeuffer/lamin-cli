@@ -203,10 +203,17 @@ def _bare_tokens_for_recipe(args: list[str], recipe: Recipe) -> list[str]:
     *exact* count of positional tokens, not just their presence.
     """
     by_flag = _expand_flag_roles(recipe.flag_roles)
+    known_flags = [*by_flag, *recipe.value_flags]
     bare = []
     i = 0
     while i < len(args):
         token = args[i]
+        # a fused "KEY=VALUE" token for a known flag (with or without a dash,
+        # e.g. GATK/Picard-style "INPUT=file.bam" as well as "--flag=value")
+        # -- the value is already inside this one token, nothing more to skip
+        if any(token.startswith(f"{flag}=") for flag in known_flags):
+            i += 1
+            continue
         if token in by_flag:
             i += 1
             if by_flag[token][1].repeatable:

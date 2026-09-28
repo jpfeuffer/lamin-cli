@@ -219,6 +219,37 @@ def test_extra_inputs_and_outputs_are_independent_of_argv():
     assert application.extra_outputs == ["*.bai"]
 
 
+# -- GATK/Picard-style "KEY=VALUE" options, no dash at all -------------------
+
+
+def test_key_value_style_options_are_recognized_without_a_dash():
+    recipe = Recipe(
+        target="gatk",
+        flag_roles={
+            "INPUT": FlagRole(role="input"),
+            "OUTPUT": FlagRole(role="output", key_template="{name}"),
+        },
+    )
+    args = ["INPUT=in.bam", "OUTPUT=out.bam"]
+    application = apply_recipe(recipe, args)
+    assert application.inputs == ["in.bam"]
+    assert [o.value for o in application.outputs] == ["out.bam"]
+
+
+def test_key_value_entrypoint_positional_is_not_corrupted_by_fused_values():
+    # the entrypoint is a bare positional; a KEY=VALUE token elsewhere must
+    # not be mistaken for one, the way a naive dash-only check would
+    recipe = Recipe(
+        target="gatk",
+        required_tokens=["SomeTool"],
+        entrypoint_positional=0,
+        flag_roles={"INPUT": FlagRole(role="input")},
+    )
+    args = ["SomeTool", "INPUT=in.bam", "train.py"]
+    application = apply_recipe(recipe, args)
+    assert application.entrypoint == "train.py"
+
+
 def test_a_tool_with_no_flags_at_all_still_matches_by_required_tokens_only():
     recipe = Recipe(target="samtools", required_tokens=["sort"])
     assert find_matching_recipe("samtools", ["sort", "in.bam"], [recipe]) is recipe
