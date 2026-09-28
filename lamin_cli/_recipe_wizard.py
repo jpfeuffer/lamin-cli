@@ -75,21 +75,38 @@ def _flag_always_lacks_a_value(flag: str, args: list[str]) -> bool:
     return found
 
 
+def _flag_has_lamin_uri_value(flag: str, args: list[str]) -> bool:
+    """Whether any occurrence of `flag` is followed by a `lamin://` URI.
+
+    An unambiguous reference to existing tracked data, so almost always an
+    input rather than something to skip.
+    """
+    from lamin_cli._uri import is_lamin_uri
+
+    for i, token in enumerate(args):
+        if token == flag and i + 1 < len(args) and is_lamin_uri(args[i + 1]):
+            return True
+        if token.startswith(f"{flag}=") and is_lamin_uri(token.split("=", 1)[1]):
+            return True
+    return False
+
+
 def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
     """Walk every distinct flag once, asking what it means."""
     flag_roles: dict[str, FlagRole] = {}
     value_flags: list[str] = []
     for flag in _unique_flags(args):
-        if _flag_always_lacks_a_value(flag, args):
+        is_boolean_like = _flag_always_lacks_a_value(flag, args)
+        if is_boolean_like:
             context = ""
             default = "boolean"
         else:
             example = _flag_example_value(flag, args)
             context = f" (e.g. {flag} {example!r})" if example is not None else ""
-            default = "skip"
+            default = "input" if _flag_has_lamin_uri_value(flag, args) else "skip"
         choice = click.prompt(
             f"what does {flag!r}{context} mean?",
-            type=click.Choice(["input", "output", "value", "boolean", "skip"]),
+            type=click.Choice(["input", "output", "boolean", "skip"]),
             default=default,
             show_choices=True,
         )
@@ -127,7 +144,9 @@ def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
                 delimiter=delimiter or None,
                 key_template=key_template or None,
             )
-        elif choice == "value":
+        elif choice == "skip" and not is_boolean_like:
+            # has a value we're choosing not to track, but it still needs to
+            # be skipped correctly when counting positional/bare tokens
             value_flags.append(flag)
     return flag_roles, value_flags
 

@@ -8,6 +8,7 @@ from lamin_cli._recipe_wizard import (
     WizardError,
     _flag_always_lacks_a_value,
     _flag_example_value,
+    _flag_has_lamin_uri_value,
     run_wizard,
 )
 
@@ -110,3 +111,84 @@ def test_a_flag_with_any_real_value_does_not_look_boolean():
 
 def test_an_absent_flag_does_not_look_boolean():
     assert _flag_always_lacks_a_value("--foo", ["--bar", "x"]) is False
+
+
+# -- a lamin:// URI value is unambiguously an input by default --------------
+
+
+def test_a_flag_pointing_at_a_lamin_uri_is_detected():
+    args = ["--data", "lamin://acme/x/artifact/key/d.csv"]
+    assert _flag_has_lamin_uri_value("--data", args) is True
+
+
+def test_a_flag_pointing_at_a_lamin_uri_via_equals_form_is_detected():
+    args = ["--data=lamin://acme/x/artifact/key/d.csv"]
+    assert _flag_has_lamin_uri_value("--data", args) is True
+
+
+def test_a_flag_pointing_at_a_plain_path_is_not_a_lamin_uri():
+    assert _flag_has_lamin_uri_value("--data", ["--data", "plain.csv"]) is False
+
+
+def test_wizard_defaults_a_lamin_uri_flag_to_input(tmp_path):
+    args = [
+        "run",
+        "train.py",
+        "--data",
+        "lamin://acme/x/artifact/key/d.csv",
+        "--out",
+        "r.csv",
+    ]
+    # accepting every default: --data should resolve to "input" without
+    # typing anything for its role
+    answers = (
+        "\n"  # --data role: accept default (should be "input")
+        "\n"  # --data repeatable? [N]
+        "\n"  # --data delimiter?
+        "\n"  # --data aliases?
+        "skip\n"  # --out role (not exercising output here)
+        "fixed\n"  # token "run"
+        "entrypoint\n"  # token "train.py"
+        "\n"  # extra_inputs? [N]
+        "\n"  # extra_outputs? [N]
+        "\n"  # version_command
+        "\n"  # environment_command
+        "y\n"  # save?
+    )
+    recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
+    assert recipe.flag_roles["--data"].role == "input"
+
+
+def test_a_skipped_but_value_bearing_flag_does_not_corrupt_positional_counting(
+    tmp_path,
+):
+    """Regression test: choosing "skip" for a flag with a real value (--out
+    here) must still register it as a value-consumer, or its value gets
+    mistaken for an unrelated positional/entrypoint token.
+    """
+    args = [
+        "run",
+        "train.py",
+        "--data",
+        "lamin://acme/x/artifact/key/d.csv",
+        "--out",
+        "r.csv",
+    ]
+    answers = (
+        "\n"  # --data role: accept default ("input")
+        "\n"  # --data repeatable?
+        "\n"  # --data delimiter?
+        "\n"  # --data aliases?
+        "skip\n"  # --out role: has a value, but not tracked
+        "fixed\n"  # token "run"
+        "entrypoint\n"  # token "train.py" -- only 2 bare tokens, not 3
+        "\n"  # extra_inputs?
+        "\n"  # extra_outputs?
+        "\n"  # version_command
+        "\n"  # environment_command
+        "y\n"  # save?
+    )
+    recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
+    assert recipe is not None
+    assert "--out" in recipe.value_flags
+    assert recipe.entrypoint_positional == 0
