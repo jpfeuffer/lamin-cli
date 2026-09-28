@@ -239,3 +239,34 @@ def test_wizard_asks_about_key_value_flags_and_defaults_correctly(tmp_path):
     assert "OUTPUT" in recipe.value_flags
     assert recipe.required_tokens == ["SomeTool"]
     assert recipe.entrypoint_positional == 0
+
+
+# -- a bare positional (no flag) can be marked input/output too -------------
+
+
+def test_wizard_supports_purely_positional_input_and_output(tmp_path):
+    # `samtools sort in.bam out.bam`: no flags at all
+    args = ["sort", "in.bam", "out.bam"]
+    answers = (
+        "fixed\n"  # token "sort"
+        "input\n"  # token "in.bam"
+        "output\n"  # token "out.bam"
+        "outputs/{name}\n"  # key template for that output
+        "\n"  # extra_inputs?
+        "\n"  # extra_outputs?
+        "\n"  # version_command
+        "\n"  # environment_command
+        "y\n"  # save?
+    )
+    recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
+    assert recipe is not None
+    assert recipe.required_tokens == ["sort"]
+    assert recipe.positional_roles[0].role == "input"
+    assert recipe.positional_roles[1].role == "output"
+    assert recipe.positional_roles[1].key_template == "outputs/{name}"
+
+    from lamin_cli._recipes import apply_recipe
+
+    application = apply_recipe(recipe, args)
+    assert application.inputs == ["in.bam"]
+    assert [o.value for o in application.outputs] == ["out.bam"]

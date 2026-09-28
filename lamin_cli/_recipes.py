@@ -55,6 +55,11 @@ class Recipe:
     # precedence if both are set; neither set means the target itself is the
     # identity.
     entrypoint_positional: int | None = None
+    # a bare positional (no flag at all) that's an input/output, e.g.
+    # `samtools sort in.bam out.bam` or `cp src dest` -- keyed the same way
+    # as entrypoint_positional: 0-based index among the bare tokens after
+    # required_tokens.
+    positional_roles: dict[int, FlagRole] = field(default_factory=dict)
     version_command: list[str] | None = None
     environment_command: list[str] | None = None
     flag_roles: dict[str, FlagRole] = field(default_factory=dict)
@@ -76,6 +81,10 @@ class Recipe:
         data["flag_roles"] = {
             flag: asdict(role) for flag, role in self.flag_roles.items()
         }
+        # JSON object keys must be strings
+        data["positional_roles"] = {
+            str(index): asdict(role) for index, role in self.positional_roles.items()
+        }
         return data
 
     @classmethod
@@ -85,6 +94,11 @@ class Recipe:
             flag: FlagRole(**role) for flag, role in data.get("flag_roles", {}).items()
         }
         data["flag_roles"] = flag_roles
+        positional_roles = {
+            int(index): FlagRole(**role)
+            for index, role in data.get("positional_roles", {}).items()
+        }
+        data["positional_roles"] = positional_roles
         return cls(**data)
 
 
@@ -322,14 +336,17 @@ def _flag_values(flags: list[str], args: list[str], *, repeatable: bool) -> list
 
 def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
     """Resolve a matched recipe's roles against a concrete invocation's argv."""
+    remaining = None
+    if recipe.entrypoint_positional is not None or recipe.positional_roles:
+        remaining = _remaining_after_required(
+            recipe.required_tokens, _bare_tokens_for_recipe(args, recipe)
+        )
+
     entrypoint = None
     if recipe.entrypoint_flag is not None:
         found = _flag_values(recipe.entrypoint_flag.split("|"), args, repeatable=False)
         entrypoint = found[0] if found else None
-    elif recipe.entrypoint_positional is not None:
-        remaining = _remaining_after_required(
-            recipe.required_tokens, _bare_tokens_for_recipe(args, recipe)
-        )
+    elif recipe.entrypoint_positional is not None and remaining is not None:
         if recipe.entrypoint_positional < len(remaining):
             entrypoint = remaining[recipe.entrypoint_positional]
 
@@ -346,6 +363,20 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
                 ResolvedOutput(value=value, key_template=role.key_template, source=key)
                 for value in values
             )
+
+    if remaining is not None:
+        for index, role in recipe.positional_roles.items():
+            if index >= len(remaining):
+                continue
+            value = remaining[index]
+            if role.role == "input":
+                inputs.append(value)
+            else:
+                outputs.append(
+                    ResolvedOutput(
+                        value=value, key_template=role.key_template, source=f"@{index}"
+                    )
+                )
 
     return RecipeApplication(
         entrypoint=entrypoint,

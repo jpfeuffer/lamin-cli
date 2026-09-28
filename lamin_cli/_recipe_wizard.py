@@ -207,16 +207,18 @@ def _bare_tokens_excluding(
 
 def _ask_required_tokens_and_entrypoint(
     args: list[str], bare_positions: list[int]
-) -> tuple[list[str], int | None]:
+) -> tuple[list[str], int | None, dict[int, FlagRole]]:
     required_tokens: list[str] = []
     entrypoint_positional: int | None = None
+    positional_roles: dict[int, FlagRole] = {}
     slot = 0
     for i in bare_positions:
         token = args[i]
         choice = click.prompt(
             f"token {i} ({token!r}): part of the fixed shape (e.g. a"
-            " subcommand), the actual script/entrypoint, or just a value?",
-            type=click.Choice(["fixed", "entrypoint", "value"]),
+            " subcommand), the actual script/entrypoint, an input, an"
+            " output, or just a value?",
+            type=click.Choice(["fixed", "entrypoint", "input", "output", "value"]),
             default="value",
             show_choices=True,
         )
@@ -225,8 +227,20 @@ def _ask_required_tokens_and_entrypoint(
             continue
         if choice == "entrypoint":
             entrypoint_positional = slot
+        elif choice in ("input", "output"):
+            key_template = None
+            if choice == "output":
+                key_template = click.prompt(
+                    "  key template for this output (e.g. outputs/{name}),"
+                    " or leave blank for the default",
+                    default="",
+                    show_default=False,
+                )
+            positional_roles[slot] = FlagRole(
+                role=choice, key_template=key_template or None
+            )
         slot += 1
-    return required_tokens, entrypoint_positional
+    return required_tokens, entrypoint_positional, positional_roles
 
 
 def _ask_extra(kind: str) -> list[str]:
@@ -304,8 +318,8 @@ def run_wizard(
 
     flag_roles, value_flags = _ask_flag_roles(args)
     bare_positions = _bare_tokens_excluding(args, flag_roles, value_flags)
-    required_tokens, entrypoint_positional = _ask_required_tokens_and_entrypoint(
-        args, bare_positions
+    required_tokens, entrypoint_positional, positional_roles = (
+        _ask_required_tokens_and_entrypoint(args, bare_positions)
     )
     extra_inputs = _ask_extra("inputs")
     extra_outputs = _ask_extra("outputs")
@@ -322,6 +336,7 @@ def run_wizard(
         target=target,
         required_tokens=required_tokens,
         entrypoint_positional=entrypoint_positional,
+        positional_roles=positional_roles,
         version_command=version_command,
         environment_command=environment_command,
         flag_roles=flag_roles,

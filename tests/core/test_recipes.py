@@ -250,6 +250,61 @@ def test_key_value_entrypoint_positional_is_not_corrupted_by_fused_values():
     assert application.entrypoint == "train.py"
 
 
+# -- purely positional inputs/outputs, no flag at all ------------------------
+
+
+def test_positional_role_resolves_a_bare_input_and_output():
+    # `samtools sort in.bam out.bam`: neither argument has a flag name
+    recipe = Recipe(
+        target="samtools",
+        required_tokens=["sort"],
+        positional_roles={
+            0: FlagRole(role="input"),
+            1: FlagRole(role="output", key_template="outputs/{name}"),
+        },
+    )
+    application = apply_recipe(recipe, ["sort", "in.bam", "out.bam"])
+    assert application.inputs == ["in.bam"]
+    assert [(o.value, o.key_template) for o in application.outputs] == [
+        ("out.bam", "outputs/{name}")
+    ]
+
+
+def test_positional_role_and_entrypoint_positional_can_coexist():
+    recipe = Recipe(
+        target="uv",
+        required_tokens=["run"],
+        entrypoint_positional=0,
+        positional_roles={1: FlagRole(role="output")},
+    )
+    application = apply_recipe(recipe, ["run", "script.py", "result.csv"])
+    assert application.entrypoint == "script.py"
+    assert [o.value for o in application.outputs] == ["result.csv"]
+
+
+def test_positional_role_out_of_range_is_ignored_not_an_error():
+    recipe = Recipe(
+        target="tool",
+        positional_roles={5: FlagRole(role="input")},
+    )
+    application = apply_recipe(recipe, ["only", "two"])
+    assert application.inputs == []
+
+
+def test_positional_roles_round_trip_through_json(tmp_path):
+    path = tmp_path / "recipes.json"
+    recipe = Recipe(
+        target="samtools",
+        required_tokens=["sort"],
+        positional_roles={0: FlagRole(role="input"), 1: FlagRole(role="output")},
+    )
+    save_recipes(path, [recipe])
+    loaded = load_recipes(path)
+    assert loaded == [recipe]
+    assert loaded[0].positional_roles[0].role == "input"
+    assert loaded[0].positional_roles[1].role == "output"
+
+
 def test_a_tool_with_no_flags_at_all_still_matches_by_required_tokens_only():
     recipe = Recipe(target="samtools", required_tokens=["sort"])
     assert find_matching_recipe("samtools", ["sort", "in.bam"], [recipe]) is recipe
