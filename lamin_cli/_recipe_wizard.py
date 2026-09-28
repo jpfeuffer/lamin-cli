@@ -46,13 +46,33 @@ def _unique_flags(args: list[str]) -> list[str]:
 
 
 def _flag_example_value(flag: str, args: list[str]) -> str | None:
-    """The first value seen for `flag`, just to show the user context."""
+    """The first plausible value seen for `flag`, to show the user context.
+
+    Never another flag: `--foo --bar` doesn't mean `--bar` is `--foo`'s
+    value, it's a sign `--foo` takes no value at all.
+    """
     for i, token in enumerate(args):
-        if token == flag and i + 1 < len(args):
+        if token == flag and i + 1 < len(args) and not _is_flag(args[i + 1]):
             return args[i + 1]
         if token.startswith(f"{flag}="):
             return token.split("=", 1)[1]
     return None
+
+
+def _flag_always_lacks_a_value(flag: str, args: list[str]) -> bool:
+    """Whether every occurrence of `flag` is followed by nothing or a flag.
+
+    Strong evidence it's a boolean, not that the user forgot to pass a value.
+    """
+    found = False
+    for i, token in enumerate(args):
+        if token == flag:
+            found = True
+            if i + 1 < len(args) and not _is_flag(args[i + 1]):
+                return False
+        elif token.startswith(f"{flag}="):
+            return False
+    return found
 
 
 def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
@@ -60,12 +80,17 @@ def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
     flag_roles: dict[str, FlagRole] = {}
     value_flags: list[str] = []
     for flag in _unique_flags(args):
-        example = _flag_example_value(flag, args)
-        context = f" (e.g. {flag} {example!r})" if example is not None else ""
+        if _flag_always_lacks_a_value(flag, args):
+            context = ""
+            default = "boolean"
+        else:
+            example = _flag_example_value(flag, args)
+            context = f" (e.g. {flag} {example!r})" if example is not None else ""
+            default = "skip"
         choice = click.prompt(
             f"what does {flag!r}{context} mean?",
             type=click.Choice(["input", "output", "value", "boolean", "skip"]),
-            default="skip",
+            default=default,
             show_choices=True,
         )
         if choice in ("input", "output"):
