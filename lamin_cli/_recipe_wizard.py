@@ -107,7 +107,13 @@ def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
     """Walk every distinct flag once, asking what it means."""
     flag_roles: dict[str, FlagRole] = {}
     value_flags: list[str] = []
-    for flag in _unique_flags(args):
+    unique = _unique_flags(args)
+    if unique:
+        logger.print(
+            "  (output_prefix = this value is a shared prefix, e.g. STAR/bowtie2"
+            ' style: everything matching "{value}*" afterward is an output)'
+        )
+    for flag in unique:
         is_boolean_like = _flag_always_lacks_a_value(flag, args)
         if is_boolean_like:
             context = ""
@@ -123,11 +129,11 @@ def _ask_flag_roles(args: list[str]) -> tuple[dict[str, FlagRole], list[str]]:
             default = "input" if _flag_has_lamin_uri_value(flag, args) else "skip"
         choice = click.prompt(
             f"what does {flag!r}{context} mean?",
-            type=click.Choice(["input", "output", "boolean", "skip"]),
+            type=click.Choice(["input", "output", "output_prefix", "boolean", "skip"]),
             default=default,
             show_choices=True,
         )
-        if choice in ("input", "output"):
+        if choice in ("input", "output", "output_prefix"):
             repeatable = click.confirm(
                 f"  does {flag!r} accept multiple trailing values"
                 f" (e.g. {flag} a b c), not just one?",
@@ -217,8 +223,11 @@ def _ask_required_tokens_and_entrypoint(
         choice = click.prompt(
             f"token {i} ({token!r}): part of the fixed shape (e.g. a"
             " subcommand), the actual script/entrypoint, an input, an"
-            " output, or just a value?",
-            type=click.Choice(["fixed", "entrypoint", "input", "output", "value"]),
+            " output, an output_prefix (a shared prefix for many output"
+            " files), or just a value?",
+            type=click.Choice(
+                ["fixed", "entrypoint", "input", "output", "output_prefix", "value"]
+            ),
             default="value",
             show_choices=True,
         )
@@ -227,7 +236,7 @@ def _ask_required_tokens_and_entrypoint(
             continue
         if choice == "entrypoint":
             entrypoint_positional = slot
-        elif choice in ("input", "output"):
+        elif choice in ("input", "output", "output_prefix"):
             key_template = None
             if choice == "output":
                 key_template = click.prompt(

@@ -282,6 +282,53 @@ def test_positional_role_and_entrypoint_positional_can_coexist():
     assert [o.value for o in application.outputs] == ["result.csv"]
 
 
+# -- output_prefix: one value fans out into many files ----------------------
+
+
+def test_output_prefix_flag_becomes_a_glob_pattern():
+    # STAR/bowtie2-style: `--out_prefix foo` writes foo.R1.fastq, foo.log, etc.
+    recipe = Recipe(
+        target="aligner",
+        flag_roles={"--out_prefix": FlagRole(role="output_prefix")},
+    )
+    application = apply_recipe(recipe, ["--out_prefix", "foo"])
+    assert application.outputs == []  # not a single named output
+    assert application.extra_outputs == ["foo*"]
+
+
+def test_output_prefix_positional_role_becomes_a_glob_pattern():
+    recipe = Recipe(
+        target="aligner",
+        positional_roles={0: FlagRole(role="output_prefix")},
+    )
+    application = apply_recipe(recipe, ["foo"])
+    assert application.extra_outputs == ["foo*"]
+
+
+def test_output_prefix_combines_with_recipes_own_extra_outputs():
+    recipe = Recipe(
+        target="aligner",
+        flag_roles={"--out_prefix": FlagRole(role="output_prefix")},
+        extra_outputs=["*.log"],
+    )
+    application = apply_recipe(recipe, ["--out_prefix", "foo"])
+    assert application.extra_outputs == ["*.log", "foo*"]
+
+
+def test_output_prefix_does_not_corrupt_positional_counting():
+    # its value must still be recognized as consumed, like input/output
+    recipe = Recipe(
+        target="aligner",
+        required_tokens=["run"],
+        entrypoint_positional=0,
+        flag_roles={"--out_prefix": FlagRole(role="output_prefix")},
+    )
+    args = ["run", "script.py", "--out_prefix", "foo"]
+    application = apply_recipe(recipe, args)
+    assert application.entrypoint == "script.py"
+    assert application.extra_outputs == ["foo*"]
+
+
 def test_positional_role_out_of_range_is_ignored_not_an_error():
     recipe = Recipe(
         target="tool",

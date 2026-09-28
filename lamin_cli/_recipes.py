@@ -28,14 +28,15 @@ RECIPES_ENV = "LAMIN_RUN_RECIPES"
 class FlagRole:
     """What a flag's value(s) mean."""
 
-    role: Literal["input", "output"]
+    role: Literal["input", "output", "output_prefix"]
     repeatable: bool = False
     # a single value is itself a delimited list, e.g. "--in a.txt,b.txt" ->
     # ["a.txt", "b.txt"]. Independent of `repeatable` (that's for repeated
     # occurrences/trailing values; this is for one value packed together).
     delimiter: str | None = None
     # for outputs: a key template, e.g. "outputs/{name}"; {name} is the
-    # basename of the value this flag pointed to
+    # basename of the value this flag pointed to. Unused for output_prefix
+    # (each matched file gets its own default cwd-relative key).
     key_template: str | None = None
 
 
@@ -352,17 +353,21 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
 
     inputs: list[str] = []
     outputs: list[ResolvedOutput] = []
+    prefix_patterns: list[str] = []
     for key, role in recipe.flag_roles.items():
         values = _flag_values(key.split("|"), args, repeatable=role.repeatable)
         if role.delimiter:
             values = [item for value in values for item in value.split(role.delimiter)]
         if role.role == "input":
             inputs.extend(values)
-        else:
+        elif role.role == "output":
             outputs.extend(
                 ResolvedOutput(value=value, key_template=role.key_template, source=key)
                 for value in values
             )
+        else:  # output_prefix: everything starting with this value, e.g. a
+            # tool that writes "{prefix}.R1.fastq", "{prefix}.log", etc.
+            prefix_patterns.extend(f"{value}*" for value in values)
 
     if remaining is not None:
         for index, role in recipe.positional_roles.items():
@@ -371,17 +376,19 @@ def apply_recipe(recipe: Recipe, args: list[str]) -> RecipeApplication:
             value = remaining[index]
             if role.role == "input":
                 inputs.append(value)
-            else:
+            elif role.role == "output":
                 outputs.append(
                     ResolvedOutput(
                         value=value, key_template=role.key_template, source=f"@{index}"
                     )
                 )
+            else:  # output_prefix
+                prefix_patterns.append(f"{value}*")
 
     return RecipeApplication(
         entrypoint=entrypoint,
         inputs=inputs,
         outputs=outputs,
         extra_inputs=list(recipe.extra_inputs),
-        extra_outputs=list(recipe.extra_outputs),
+        extra_outputs=[*recipe.extra_outputs, *prefix_patterns],
     )

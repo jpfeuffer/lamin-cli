@@ -270,3 +270,27 @@ def test_wizard_supports_purely_positional_input_and_output(tmp_path):
     application = apply_recipe(recipe, args)
     assert application.inputs == ["in.bam"]
     assert [o.value for o in application.outputs] == ["out.bam"]
+
+
+def test_wizard_supports_output_prefix_flags(tmp_path):
+    # STAR/bowtie2-style: `aligner --out_prefix foo` writes many files
+    args = ["--out_prefix", "foo"]
+    answers = (
+        "output_prefix\n"  # --out_prefix role
+        "\n"  # repeatable?
+        "\n"  # delimiter?
+        "\n"  # aliases?
+        "\n"  # extra_inputs?
+        "\n"  # extra_outputs?
+        "\n"  # version_command
+        "\n"  # environment_command
+        "y\n"  # save?
+    )
+    recipe = _run_wizard_with_answers(tmp_path, answers, args=args)
+    assert recipe is not None
+    assert recipe.flag_roles["--out_prefix"].role == "output_prefix"
+
+    from lamin_cli._recipes import apply_recipe
+
+    application = apply_recipe(recipe, args)
+    assert application.extra_outputs == ["foo*"]
