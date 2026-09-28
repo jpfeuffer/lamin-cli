@@ -20,6 +20,8 @@ from lamin_utils import logger
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from lamindb.models import Branch, Run, Space
+
 WHERE_ENV = "LAMIN_RUN_WHERE"
 DEFAULT_WHERE = "local"
 SCRIPT_SUFFIXES = {".py", ".pyw", ".sh", ".bash", ".zsh", ".r", ".R", ".Rmd", ".qmd"}
@@ -49,6 +51,7 @@ class RunRequest:
     space: str | None = None
     upload_outputs: bool = False
     dry_run: bool = False
+    recipe_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,10 +277,10 @@ def command_for(target: str) -> list[str]:
     return [executable, *interpreter[1:], target]
 
 
-def _probe_version(executable: str) -> str | None:
+def _probe_version_command(command: list[str]) -> str | None:
     try:
         result = subprocess.run(
-            [executable, "--version"],
+            command,
             capture_output=True,
             check=False,
             text=True,
@@ -291,8 +294,16 @@ def _probe_version(executable: str) -> str | None:
     return output.splitlines()[0] if output else None
 
 
+def _probe_version(executable: str) -> str | None:
+    return _probe_version_command([executable, "--version"])
+
+
 def _prepare_transform(
-    target: str, kind: Literal["script", "executable"], branch, space
+    target: str,
+    kind: Literal["script", "executable"],
+    branch,
+    space,
+    version_command: list[str] | None = None,
 ):
     """Create or reuse the transform, and probe the version of whatever runs it.
 
@@ -301,39 +312,51 @@ def _prepare_transform(
     lamindb never auto-versions), so a later run with a different version would
     silently rewrite earlier runs' history. `_prepare_run` records it per run
     instead, in `run.params["tool_version"]`.
+
+    `version_command`, when a recipe supplies one, overrides the default probe
+    entirely -- e.g. `uv run python --version` for a launcher whose own
+    `--version` wouldn't reveal the interpreter actually running the script.
     """
     import lamindb as ln
 
     path = Path(target)
-    if kind == "script":
-        interpreter = command_for(target)[0]
-        version = _probe_version(interpreter)
+    if version_command is not None:
+        version = _probe_version_command(version_command)
+    elif kind == "script":
+        version = _probe_version(command_for(target)[0])
+    else:
+        version = _probe_version(target)
+    if kind == "script" and path.is_file():
         transform = ln.Transform(
             key=path.name, source_code=path.read_text(), kind="script"
         )
     else:
-        version = _probe_version(target)
         transform = ln.Transform(key=path.name, kind="pipeline")
     transform.branch = branch
     transform.space = space
     return transform.save(), version
 
 
-def _track_child_python_environment(run) -> None:
-    """Snapshot `pip freeze` of the interpreter a Python script runs under.
+def _track_child_python_environment(run, command: list[str] | None = None) -> None:
+    """Snapshot the environment the target ran in, e.g. `pip freeze`.
 
-    Links it to the run as `run.environment`, mirroring what `ln.track()` does for
-    its own process (see `lamindb.core._track_environment`), but for the child
-    interpreter `lamin run` resolves the script to rather than lamin's own.
+    Links it to the run as `run.environment`, mirroring what `ln.track()` does
+    for its own process (see `lamindb.core._track_environment`), but for the
+    child interpreter `lamin run` resolves the script to rather than lamin's
+    own. `command`, when a recipe supplies one, overrides the default
+    (`pip freeze` of the resolved interpreter) entirely -- e.g.
+    `uv run pip freeze` for a wrapped launcher.
     """
     import lamindb as ln
     import lamindb_setup as ln_setup
     from lamindb_setup.core.hashing import hash_file
 
-    executable = _active_python_executable()
+    if command is None:
+        executable = _active_python_executable()
+        command = [executable, "-m", "pip", "freeze"]
     try:
         result = subprocess.run(
-            [executable, "-m", "pip", "freeze"],
+            command,
             capture_output=True,
             text=True,
             timeout=30,
@@ -365,7 +388,7 @@ def _track_child_python_environment(run) -> None:
         )
         artifact.save(upload=True, print_progress=False)
     run.environment = artifact
-    _note(f"tracked the Python environment ({executable})")
+    _note(f"tracked the environment ({shlex.join(command)})")
 
 
 def status_code_for(returncode: int) -> int:
@@ -382,27 +405,36 @@ def status_code_for(returncode: int) -> int:
     return STATUS_ERRORED
 
 
-def collect_output_paths(child_argv: list[str], register_outputs) -> list[Path]:
-    """Outputs named explicitly or via the common `--out`/`--output` flags."""
-    paths = [Path(output) for output in register_outputs]
+def collect_output_paths(
+    child_argv: list[str], register_outputs
+) -> list[tuple[Path, str | None]]:
+    """Outputs named explicitly or via the common `--out`/`--output` flags.
+
+    Each entry pairs a path with an optional key template (`None` unless a
+    recipe supplied one); `_register_outputs` falls back to the cwd-relative
+    path when there isn't one.
+    """
+    paths: list[tuple[Path, str | None]] = [
+        (Path(output), None) for output in register_outputs
+    ]
     args = child_argv[1:]
     i = 0
     while i < len(args):
         arg = args[i]
         if arg in {"--out", "--output"} and i + 1 < len(args):
             if not args[i + 1].startswith("-"):
-                paths.append(Path(args[i + 1]))
+                paths.append((Path(args[i + 1]), None))
                 i += 2
                 continue
         for prefix in ("--out=", "--output="):
             if arg.startswith(prefix):
-                paths.append(Path(arg.removeprefix(prefix)))
+                paths.append((Path(arg.removeprefix(prefix)), None))
         i += 1
     return paths
 
 
 def _register_outputs(
-    run, paths: list[Path], branch, space, *, upload_outputs: bool
+    run, paths: list[tuple[Path, str | None]], branch, space, *, upload_outputs: bool
 ) -> None:
     import lamindb as ln
     import lamindb_setup as ln_setup
@@ -410,18 +442,21 @@ def _register_outputs(
     keep_local = ln_setup.settings.instance.keep_artifacts_local
     cwd = Path.cwd()
     seen: set[Path] = set()
-    for path in paths:
+    for path, key_template in paths:
         resolved = path.resolve()
         if resolved in seen or not path.exists():
             continue
         seen.add(resolved)
-        try:
-            # preserve the directory structure the target wrote into, e.g.
-            # "results/summary.csv" rather than just "summary.csv"
-            key = str(resolved.relative_to(cwd))
-        except ValueError:
-            # outside cwd (e.g. an absolute path elsewhere): fall back to the name
-            key = path.name
+        if key_template is not None:
+            key = key_template.format(name=path.name)
+        else:
+            try:
+                # preserve the directory structure the target wrote into, e.g.
+                # "results/summary.csv" rather than just "summary.csv"
+                key = str(resolved.relative_to(cwd))
+            except ValueError:
+                # outside cwd (e.g. an absolute path elsewhere): fall back to the name
+                key = path.name
         artifact = ln.Artifact(path, key=key, run=run, branch=branch, space=space)
         artifact.save(upload=True if upload_outputs else None, print_progress=False)
         if keep_local and not upload_outputs:
@@ -550,10 +585,30 @@ def _lamin_logs_to_stderr() -> None:
             handler.stream = sys.stderr
 
 
-def _prepare_run(request: RunRequest):
+@dataclass
+class PreparedRun:
+    run: Run
+    target: str
+    target_args: list[str]
+    child_argv: list[str]
+    translations: list[Translation]
+    branch: Branch
+    space: Space
+    identity_target: str
+    recipe_outputs: list[tuple[Path, str | None]]
+    environment_command: list[str] | None
+
+
+def _prepare_run(request: RunRequest) -> PreparedRun:
     """Resolve inputs and record the run, before anything is executed."""
     import lamindb as ln
 
+    from lamin_cli._recipes import (
+        apply_recipe,
+        find_matching_recipe,
+        load_recipes,
+        recipes_path,
+    )
     from lamin_cli._uri import is_lamin_uri
 
     target = request.target
@@ -565,15 +620,39 @@ def _prepare_run(request: RunRequest):
     if kind == "script" and not Path(target).is_file():
         raise RunError(f"Script {target!r} does not exist.")
 
+    recipes = load_recipes(recipes_path(request.recipe_file))
+    recipe = find_matching_recipe(Path(target).name, request.args, recipes)
+    application = apply_recipe(recipe, request.args) if recipe is not None else None
+    if recipe is not None:
+        _note(f"using recipe for {recipe.target!r} (tokens: {recipe.required_tokens})")
+
+    # the recipe's entrypoint (e.g. a script `uv run` launches) identifies the
+    # transform; the target itself (`uv`) still runs unchanged
+    identity_target = target
+    identity_kind = kind
+    if application is not None and application.entrypoint is not None:
+        identity_target = application.entrypoint
+        identity_kind = classify_target(identity_target)
+
     project_record = _resolve_project(request)
     branch, space = _resolve_branch_and_space(request)
 
     target_args, translations = translate_argv(request.args, request.remount, _note)
     for translation in translations:
         _note(f"{translation.uri} -> {translation.local_path} (via {translation.via})")
+    if application is not None:
+        for value in application.inputs:
+            if not is_lamin_uri(value):
+                _note(
+                    f"recipe marks {value!r} as an input, but it isn't a lamin://"
+                    " URI and can't be linked as one yet"
+                )
     child_argv = [*command_for(target), *target_args]
 
-    transform, tool_version = _prepare_transform(target, kind, branch, space)
+    version_command = recipe.version_command if recipe is not None else None
+    transform, tool_version = _prepare_transform(
+        identity_target, identity_kind, branch, space, version_command
+    )
     run = ln.Run(transform=transform)
     run.branch = branch
     run.space = space
@@ -600,7 +679,27 @@ def _prepare_run(request: RunRequest):
     if project_record is not None:
         run.projects.add(project_record)
     _link_inputs(run, translations)
-    return run, target, target_args, child_argv, translations, branch, space
+
+    recipe_outputs: list[tuple[Path, str | None]] = []
+    if application is not None:
+        recipe_outputs.extend(
+            (Path(output.value), output.key_template) for output in application.outputs
+        )
+        for pattern in application.extra_outputs:
+            recipe_outputs.extend((path, None) for path in Path.cwd().glob(pattern))
+
+    return PreparedRun(
+        run=run,
+        target=target,
+        target_args=target_args,
+        child_argv=child_argv,
+        translations=translations,
+        branch=branch,
+        space=space,
+        identity_target=identity_target,
+        recipe_outputs=recipe_outputs,
+        environment_command=recipe.environment_command if recipe is not None else None,
+    )
 
 
 def run_local(request: RunRequest) -> int:
@@ -612,15 +711,16 @@ def run_local(request: RunRequest) -> int:
         import lamindb as ln
         from lamindb.core._finish import save_run_logs
 
-        run, target, target_args, child_argv, translations, branch, space = (
-            _prepare_run(request)
-        )
-        if Path(target).suffix in {".py", ".pyw"}:
-            _track_child_python_environment(run)
+        prepared = _prepare_run(request)
+        run = prepared.run
+        if prepared.environment_command is not None or Path(
+            prepared.identity_target
+        ).suffix in {".py", ".pyw"}:
+            _track_child_python_environment(run, prepared.environment_command)
 
     env = {
         **os.environ,
-        **child_environment(run.uid, request.project, translations),
+        **child_environment(run.uid, request.project, prepared.translations),
     }
     env.setdefault("PYTHONUNBUFFERED", "1")
 
@@ -632,23 +732,31 @@ def run_local(request: RunRequest) -> int:
     returncode = STATUS_ERRORED
     try:
         try:
-            returncode = run_teed(child_argv, env)
+            returncode = run_teed(prepared.child_argv, env)
         except FileNotFoundError:
-            _note(f"error: {child_argv[0]!r} was not found")
+            _note(f"error: {prepared.child_argv[0]!r} was not found")
             returncode = 127
         except PermissionError:
-            _note(f"error: {child_argv[0]!r} is not executable")
+            _note(f"error: {prepared.child_argv[0]!r} is not executable")
             returncode = 126
         if returncode == 0:
+            # recipe-templated entries first, so they win the dedup below over
+            # the generic --out/--output heuristic matching the same path
+            output_paths = list(prepared.recipe_outputs)
+            output_paths.extend(
+                collect_output_paths(
+                    [prepared.target, *prepared.target_args], request.register_outputs
+                )
+            )
             _register_outputs(
                 run,
-                collect_output_paths([target, *target_args], request.register_outputs),
-                branch,
-                space,
+                output_paths,
+                prepared.branch,
+                prepared.space,
                 upload_outputs=request.upload_outputs,
             )
         else:
-            _note(f"{Path(target).name} exited with code {returncode}")
+            _note(f"{Path(prepared.target).name} exited with code {returncode}")
     finally:
         run._status_code = status_code_for(returncode)
         run.finished_at = datetime.now(timezone.utc)
@@ -668,6 +776,12 @@ def run_dry(request: RunRequest) -> int:
     """
     import lamindb as ln
 
+    from lamin_cli._recipes import (
+        apply_recipe,
+        find_matching_recipe,
+        load_recipes,
+        recipes_path,
+    )
     from lamin_cli._uri import is_lamin_uri
 
     target = request.target
@@ -677,6 +791,18 @@ def run_dry(request: RunRequest) -> int:
     kind = classify_target(target)
     if kind == "script" and not Path(target).is_file():
         raise RunError(f"Script {target!r} does not exist.")
+
+    recipes = load_recipes(recipes_path(request.recipe_file))
+    recipe = find_matching_recipe(Path(target).name, request.args, recipes)
+    application = apply_recipe(recipe, request.args) if recipe is not None else None
+    if recipe is not None:
+        _note(f"using recipe for {recipe.target!r} (tokens: {recipe.required_tokens})")
+
+    identity_target = target
+    identity_kind = kind
+    if application is not None and application.entrypoint is not None:
+        identity_target = application.entrypoint
+        identity_kind = classify_target(identity_target)
 
     project_record = _resolve_project(request)
     branch, space = _resolve_branch_and_space(request)
@@ -691,21 +817,28 @@ def run_dry(request: RunRequest) -> int:
 
     # constructing (not saving) a Transform still runs its own reuse-by-key /
     # reuse-by-content-hash lookup, so this reports the real outcome without a write
-    path = Path(target)
-    if kind == "script":
-        interpreter = command_for(target)[0]
-        version = _probe_version(interpreter)
+    path = Path(identity_target)
+    version_command = recipe.version_command if recipe is not None else None
+    if version_command is not None:
+        version = _probe_version_command(version_command)
+    elif identity_kind == "script":
+        version = _probe_version(command_for(identity_target)[0])
+    else:
+        version = _probe_version(identity_target)
+    if identity_kind == "script" and path.is_file():
         transform = ln.Transform(
             key=path.name, source_code=path.read_text(), kind="script"
         )
     else:
-        version = _probe_version(target)
         transform = ln.Transform(key=path.name, kind="pipeline")
     outcome = "would create a new" if transform._state.adding else "would reuse the"
     _note(f"transform: {outcome} transform {path.name!r} (uid={transform.uid})")
     if version is not None:
         _note(f"tool_version: {version}")
-    if kind == "script" and Path(target).suffix in {".py", ".pyw"}:
+    environment_command = recipe.environment_command if recipe is not None else None
+    if environment_command is not None:
+        _note(f"would snapshot the environment ({shlex.join(environment_command)})")
+    elif identity_kind == "script" and path.suffix in {".py", ".pyw"}:
         _note(f"would snapshot the Python environment ({_active_python_executable()})")
 
     for translation in translations:
@@ -719,27 +852,49 @@ def run_dry(request: RunRequest) -> int:
                 f"input: {translation.uri} -> {translation.local_path}"
                 f" (via {translation.via}, in another instance, would NOT be linked)"
             )
+    if application is not None:
+        for value in application.inputs:
+            if not is_lamin_uri(value):
+                _note(
+                    f"recipe marks {value!r} as an input, but it isn't a lamin://"
+                    " URI and can't be linked as one yet"
+                )
 
-    output_paths = collect_output_paths(
-        [target, *target_args], request.register_outputs
+    # recipe-templated entries first, so they win the dedup below over the
+    # generic --out/--output heuristic matching the same path
+    output_paths: list[tuple[Path, str | None]] = []
+    if application is not None:
+        output_paths.extend(
+            (Path(output.value), output.key_template) for output in application.outputs
+        )
+        for pattern in application.extra_outputs:
+            output_paths.extend((p, None) for p in Path.cwd().glob(pattern))
+    output_paths.extend(
+        collect_output_paths([target, *target_args], request.register_outputs)
     )
     cwd = Path.cwd()
     seen: set[Path] = set()
-    for path in output_paths:
-        resolved = path.resolve()
+    for output_path, key_template in output_paths:
+        resolved = output_path.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        try:
-            key = str(resolved.relative_to(cwd))
-        except ValueError:
-            key = path.name
-        if path.exists():
-            _note(f"output: {path} -> key {key!r} (exists now; would be registered)")
+        if key_template is not None:
+            key = key_template.format(name=output_path.name)
+        else:
+            try:
+                key = str(resolved.relative_to(cwd))
+            except ValueError:
+                key = output_path.name
+        if output_path.exists():
+            _note(
+                f"output: {output_path} -> key {key!r} (exists now; would be"
+                " registered)"
+            )
         else:
             _note(
-                f"output: {path} -> key {key!r} (does not exist yet; would only be"
-                " registered if the run creates it)"
+                f"output: {output_path} -> key {key!r} (does not exist yet; would"
+                " only be registered if the run creates it)"
             )
 
     _note("dry run: nothing was executed or saved")

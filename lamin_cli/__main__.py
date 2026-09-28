@@ -1511,6 +1511,7 @@ _MODAL_ONLY = ("image_url", "packages", "cpu", "gpu")
 @click.option("--space", type=str, default=None, help="A space name or uid for the transform, run and any outputs. Defaults to the current local space.")
 @click.option("--upload-outputs", is_flag=True, default=False, help="Force outputs to upload even if the instance keeps artifacts local by default.")
 @click.option("--dry-run", is_flag=True, default=False, help="Report what would be linked as inputs and registered as outputs, without executing the target or saving anything. Local only.")
+@click.option("--recipe-file", type=str, default=None, help="Where to look up/store recipes for ambiguous targets. Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.")
 @click.pass_context
 # fmt: on
 def run(
@@ -1528,6 +1529,7 @@ def run(
     space: str | None,
     upload_outputs: bool,
     dry_run: bool,
+    recipe_file: str | None,
 ):
     """Run a script or executable, tracked as a run.
 
@@ -1609,6 +1611,7 @@ def run(
         space=space,
         upload_outputs=upload_outputs,
         dry_run=dry_run,
+        recipe_file=recipe_file,
     )
     try:
         if dry_run:

@@ -209,7 +209,11 @@ def test_exit_codes_map_onto_run_statuses(returncode, status):
 def test_outputs_are_collected_from_flags_and_explicit_registration():
     argv = ["tool", "--out", "a.txt", "--output=b.txt", "--out", "--verbose"]
     paths = _run.collect_output_paths(argv, ("c.txt",))
-    assert paths == [Path("c.txt"), Path("a.txt"), Path("b.txt")]
+    assert paths == [
+        (Path("c.txt"), None),
+        (Path("a.txt"), None),
+        (Path("b.txt"), None),
+    ]
 
 
 # -- how a target is started -------------------------------------------------
@@ -675,7 +679,7 @@ def test_keep_artifacts_local_is_honored_and_warns(tmp_path, monkeypatch, capsys
         output.write_text("x")
         _run._register_outputs(
             run,
-            [output],
+            [(output, None)],
             ln_setup.settings.branch,
             ln_setup.settings.space,
             upload_outputs=False,
@@ -711,7 +715,7 @@ def test_upload_outputs_suppresses_the_keep_local_warning(
         output.write_text("x")
         _run._register_outputs(
             run,
-            [output],
+            [(output, None)],
             ln_setup.settings.branch,
             ln_setup.settings.space,
             upload_outputs=True,
