@@ -1513,6 +1513,7 @@ _MODAL_ONLY = ("image_url", "packages", "cpu", "gpu")
 @click.option("--dry-run", is_flag=True, default=False, help="Report what would be linked as inputs and registered as outputs, without executing the target or saving anything. Local only.")
 @click.option("--recipe-file", type=str, default=None, help="Where to look up/store recipes for ambiguous targets. Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.")
 @click.option("--output-key", "output_keys", multiple=True, type=str, help="Override a recipe output's key for this run only: a bare TEMPLATE if there's exactly one output, or FLAG=TEMPLATE to target a specific one. Repeatable.")
+@click.option("--new-recipe", is_flag=True, default=False, help="Interactively define (or redefine) a recipe for this invocation shape before running it.")
 @click.pass_context
 # fmt: on
 def run(
@@ -1532,6 +1533,7 @@ def run(
     dry_run: bool,
     recipe_file: str | None,
     output_keys: tuple[str, ...],
+    new_recipe: bool,
 ):
     """Run a script or executable, tracked as a run.
 
@@ -1574,6 +1576,13 @@ def run(
     following the instance's `keep_artifacts_local` setting; pass `--upload-outputs`
     to force it for this run. Use `--dry-run` to preview all of this first.
 
+    For a target without a recognized script suffix (e.g. `wc`, or a launcher
+    like `uv run script.py`), identity/inputs/outputs otherwise fall back to
+    the target's own name and `lamin://` URIs only. `--new-recipe` interactively
+    defines how to interpret this shape of invocation instead -- which token is
+    the real entrypoint, what each flag means -- saved for next time (see
+    `lamin settings run-recipe`).
+
     → Python/R alternative: no equivalent
     """
     from lamin_cli._run import RunError, RunRequest, dispatch, resolve_where
@@ -1615,6 +1624,7 @@ def run(
         dry_run=dry_run,
         recipe_file=recipe_file,
         output_keys=output_keys,
+        new_recipe=new_recipe,
     )
     try:
         if dry_run:

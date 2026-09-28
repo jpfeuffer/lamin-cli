@@ -32,6 +32,7 @@ def settings(ctx):
     - `worktree` → toggle {attr}`~lamindb.setup.core.SetupSettings.worktree` mode (dev-dir is a worktree parent where each child directory maps on a branch)
     - `mount` → read-only mounts of storage locations, used by `lamin run` to read inputs in place
     - `run-where` → default place for `lamin run` (overridden by `$LAMIN_RUN_WHERE` and `--where`)
+    - `run-recipe` → inspect/remove recipes for ambiguous `lamin run` targets (created via `lamin run --new-recipe`)
 
     You can display your current settings by running: `lamin info`
 
@@ -69,6 +70,10 @@ def settings(ctx):
     lamin settings run-where get
     lamin settings run-where set modal
     lamin settings run-where unset
+    # run-recipe
+    lamin settings run-recipe list
+    lamin settings run-recipe show mytool
+    lamin settings run-recipe remove mytool
     ```
 
     → Python/R alternative: {attr}`~lamindb.setup.core.SetupSettings.dev_dir`, {attr}`~lamindb.setup.core.SetupSettings.cache_dir`, {attr}`~lamindb.setup.core.SetupSettings.modules`, {attr}`~lamindb.setup.core.SetupSettings.branch`, and {attr}`~lamindb.setup.core.SetupSettings.space`
@@ -209,6 +214,109 @@ def run_where_unset():
 
 
 settings.add_command(run_where_group)
+
+
+# run-recipe group: recipes are created via `lamin run --new-recipe`, this
+# group is just for inspecting/removing what's already there
+# -----------------------------------------------------------------------------
+
+
+@click.group("run-recipe")
+def run_recipe_group():
+    """Inspect or remove recipes for ambiguous `lamin run` targets.
+
+    Recipes are created interactively via `lamin run --new-recipe`, not here.
+    """
+
+
+@run_recipe_group.command("list")
+@click.option(
+    "--recipe-file",
+    type=str,
+    default=None,
+    help="Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.",
+)
+def run_recipe_list(recipe_file: str | None):
+    """List recipes, and where they're stored."""
+    from lamin_cli._recipes import load_recipes, recipes_path
+
+    path = recipes_path(recipe_file)
+    recipes = load_recipes(path)
+    click.echo(f"{path}:")
+    if not recipes:
+        click.echo("  (no recipes yet)")
+        return
+    for recipe in recipes:
+        click.echo(f"  {recipe.target} {recipe.required_tokens}")
+
+
+@run_recipe_group.command("show")
+@click.argument("target", type=str)
+@click.option(
+    "--recipe-file",
+    type=str,
+    default=None,
+    help="Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.",
+)
+def run_recipe_show(target: str, recipe_file: str | None):
+    """Show every recipe defined for TARGET."""
+    import json as _json
+
+    from lamin_cli._recipes import load_recipes, recipes_path
+
+    recipes = [r for r in load_recipes(recipes_path(recipe_file)) if r.target == target]
+    if not recipes:
+        raise click.ClickException(f"No recipe for {target!r}.")
+    for recipe in recipes:
+        click.echo(_json.dumps(recipe.to_dict(), indent=2))
+
+
+@run_recipe_group.command("remove")
+@click.argument("target", type=str)
+@click.option(
+    "--required-token",
+    "required_tokens",
+    multiple=True,
+    type=str,
+    help="The recipe's required_tokens, to pick one if TARGET has more than one shape. Repeatable, in order.",
+)
+@click.option(
+    "--recipe-file",
+    type=str,
+    default=None,
+    help="Defaults to $LAMIN_RUN_RECIPES, then a local per-machine file.",
+)
+def run_recipe_remove(
+    target: str, required_tokens: tuple[str, ...], recipe_file: str | None
+):
+    """Remove a recipe for TARGET."""
+    from lamin_cli._recipes import load_recipes, recipes_path, save_recipes
+
+    path = recipes_path(recipe_file)
+    recipes = load_recipes(path)
+    matches = [r for r in recipes if r.target == target]
+    if not matches:
+        raise click.ClickException(f"No recipe for {target!r}.")
+    if len(matches) > 1 and not required_tokens:
+        shapes = ", ".join(str(r.required_tokens) for r in matches)
+        raise click.ClickException(
+            f"{target!r} has more than one recipe ({shapes}); pass"
+            " --required-token to pick one."
+        )
+    to_remove = (
+        matches[0]
+        if not required_tokens
+        else next(
+            (r for r in matches if r.required_tokens == list(required_tokens)), None
+        )
+    )
+    if to_remove is None:
+        raise click.ClickException(f"No recipe for {target!r} with that shape.")
+    save_recipes(path, [r for r in recipes if r is not to_remove])
+    click.echo(f"removed recipe for {target!r} ({to_remove.required_tokens})")
+
+
+settings.add_command(run_recipe_group)
 
 
 # -----------------------------------------------------------------------------

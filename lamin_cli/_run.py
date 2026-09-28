@@ -53,6 +53,7 @@ class RunRequest:
     dry_run: bool = False
     recipe_file: str | None = None
     output_keys: tuple[str, ...] = ()
+    new_recipe: bool = False
 
 
 @dataclass(frozen=True)
@@ -632,16 +633,29 @@ class PreparedRun:
     environment_command: list[str] | None
 
 
+def _resolve_recipe(target: str, request: RunRequest):
+    """The recipe to apply, defining a new one interactively if asked to."""
+    from lamin_cli._recipes import find_matching_recipe, load_recipes, recipes_path
+
+    path = recipes_path(request.recipe_file)
+    if request.new_recipe:
+        from lamin_cli._recipe_wizard import WizardError, run_wizard
+
+        try:
+            return run_wizard(
+                Path(target).name, command_for(target), request.args, path
+            )
+        except WizardError as error:
+            raise RunError(str(error)) from None
+    recipes = load_recipes(path)
+    return find_matching_recipe(Path(target).name, request.args, recipes)
+
+
 def _prepare_run(request: RunRequest) -> PreparedRun:
     """Resolve inputs and record the run, before anything is executed."""
     import lamindb as ln
 
-    from lamin_cli._recipes import (
-        apply_recipe,
-        find_matching_recipe,
-        load_recipes,
-        recipes_path,
-    )
+    from lamin_cli._recipes import apply_recipe
     from lamin_cli._uri import is_lamin_uri
 
     target = request.target
@@ -653,8 +667,7 @@ def _prepare_run(request: RunRequest) -> PreparedRun:
     if kind == "script" and not Path(target).is_file():
         raise RunError(f"Script {target!r} does not exist.")
 
-    recipes = load_recipes(recipes_path(request.recipe_file))
-    recipe = find_matching_recipe(Path(target).name, request.args, recipes)
+    recipe = _resolve_recipe(target, request)
     application = apply_recipe(recipe, request.args) if recipe is not None else None
     if recipe is not None:
         _note(f"using recipe for {recipe.target!r} (tokens: {recipe.required_tokens})")
@@ -815,12 +828,7 @@ def run_dry(request: RunRequest) -> int:
     """
     import lamindb as ln
 
-    from lamin_cli._recipes import (
-        apply_recipe,
-        find_matching_recipe,
-        load_recipes,
-        recipes_path,
-    )
+    from lamin_cli._recipes import apply_recipe
     from lamin_cli._uri import is_lamin_uri
 
     target = request.target
@@ -831,8 +839,7 @@ def run_dry(request: RunRequest) -> int:
     if kind == "script" and not Path(target).is_file():
         raise RunError(f"Script {target!r} does not exist.")
 
-    recipes = load_recipes(recipes_path(request.recipe_file))
-    recipe = find_matching_recipe(Path(target).name, request.args, recipes)
+    recipe = _resolve_recipe(target, request)
     application = apply_recipe(recipe, request.args) if recipe is not None else None
     if recipe is not None:
         _note(f"using recipe for {recipe.target!r} (tokens: {recipe.required_tokens})")

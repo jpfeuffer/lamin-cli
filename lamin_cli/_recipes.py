@@ -136,20 +136,27 @@ def save_recipes(path: Path, recipes: list[Recipe]) -> None:
         raise
 
 
-def add_recipe(path: Path, new_recipe: Recipe) -> Recipe:
+def add_recipe(path: Path, new_recipe: Recipe, *, overwrite: bool = False) -> Recipe:
     """Save `new_recipe`, reusing an identical one that appeared concurrently.
 
     Mirrors how lamindb itself reuses an existing Transform by hash rather
     than creating a duplicate: two `lamin run` invocations racing to define a
     recipe for the same shape should converge on one, not fork into two.
+
+    `overwrite`, for someone deliberately redefining an existing recipe (the
+    wizard's `--new-recipe`), replaces a match instead of reusing it.
     """
     recipes = load_recipes(path)
-    for existing in recipes:
+    for i, existing in enumerate(recipes):
         if (
             existing.target == new_recipe.target
             and existing.required_tokens == new_recipe.required_tokens
         ):
-            return existing
+            if not overwrite:
+                return existing
+            recipes[i] = new_recipe
+            save_recipes(path, recipes)
+            return new_recipe
     recipes.append(new_recipe)
     save_recipes(path, recipes)
     return new_recipe
